@@ -32,15 +32,34 @@ def main():
         action="store_true",
         help="啟用帳戶單次查詢模式（同步向 API 查詢一次帳戶水位與部位後立即結束）"
     )
+    parser.add_argument(
+        "-t", "--test-report",
+        action="store_true",
+        help="執行永豐 API 模擬環境功能交易測試，並輸出測試報告"
+    )
     args = parser.parse_args()
 
     # 1. 初始化日誌系統 (日誌寫入至 app.log)
-    # 註：這裡將 enable_console 設為 False，防止一般的 print 日誌打亂 Rich Live UI 的動態排版。
-    # 所有的 log 將會記錄於 app.log 檔案中，且最近的 4 條 log 會自動被收集並顯示於 UI 最下方的日誌面板中。
-    logger = setup_logger(name="SPF_API", log_file="app.log", level=logging.INFO, enable_console=False)
+    # 註：在執行測試報告模式時，將 enable_console 設為 True 方便追蹤進度；
+    # 其餘模式設為 False，防止一般的 print 日誌打亂 Rich Live UI 的動態排版。
+    is_test = args.test_report
+    logger = setup_logger(name="SPF_API", log_file="app.log", level=logging.INFO, enable_console=is_test)
     
     logger.info("=========================================")
     logger.info("台股期貨與大盤即時監控程式啟動中...")
+
+    # 優先處理模擬環境交易測試與報告生成
+    if args.test_report:
+        try:
+            from simulation_tester import SimulationTester
+            tester = SimulationTester(logger)
+            tester.run_test_sequence()
+        except KeyboardInterrupt:
+            logger.warning("測試程序被使用者中斷。")
+        except Exception as e:
+            logger.critical(f"執行測試程序時發生嚴重異常: {e}", exc_info=True)
+        finally:
+            sys.exit(0)
 
     # 2. 建立行情監控核心物件
     monitor = MarketMonitor(logger)

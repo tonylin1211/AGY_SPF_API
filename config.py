@@ -17,6 +17,22 @@ class Config:
     # 是否開啟模擬交易環境，預設為 True
     SIMULATION: bool = os.getenv("SHIOAJI_SIMULATION", "True").strip().lower() in ("true", "1", "yes", "on")
 
+    # 永豐憑證路徑 (CA Certificate Path, .pfx 檔案)
+    CA_PATH: str = os.getenv("SHIOAJI_CA_PATH", "").strip()
+    
+    # 永豐憑證密碼 (CA Password)
+    CA_PASSWORD: str = os.getenv("SHIOAJI_CA_PASSWORD", "").strip()
+    
+    # 身份證字號/統一編號 (Person ID, 若不提供則程式自動從期貨帳戶中抓取)
+    PERSON_ID: str = os.getenv("SHIOAJI_PERSON_ID", "").strip()
+
+    @classmethod
+    def has_ca_credentials(cls) -> bool:
+        """
+        檢查是否已填寫 CA 憑證路徑與密碼。
+        """
+        return bool(cls.CA_PATH and cls.CA_PASSWORD)
+
     # 訂閱的期貨與大盤商品代碼定義
     # 台股期貨近月合約 (TXFR1)，會自動於換月時更新
     FUTURES_CODE: str = "TXFR1"

@@ -88,6 +88,23 @@ SHIOAJI_SIMULATION=True
   venv/bin/python3 main.py --query
   ```
 
+### 5. 模擬環境功能交易測試與報告生成模式 (`-t` / `--test-report`)
+向券商申請開通 API 正式下單權限前，通常需要提交一份在模擬環境（Simulation=True）下進行下單、改價、刪單的交易日誌測試報告。本專案已將此測試流程完全自動化。
+- **運行指令**：
+  ```bash
+  venv/bin/python3 main.py -t
+  # 或
+  venv/bin/python3 main.py --test-report
+  ```
+- **自動化測試流程**：
+  1. 連線至模擬交易環境。
+  2. 載入並啟用您的 CA 憑證。
+  3. 發送期貨買進限價 ROD 單 1 口（委託價格會防呆設為最新市價減 1000 點，確保不成交）。
+  4. 發送改單要求（調升委託價格 100 點）。
+  5. 發送撤單要求（撤銷該筆委託）。
+  6. **產出測試報告**：在專案根目錄下自動生成符合永豐金格式要求的 `shioaji_simulation_test_report.md` Markdown 報告檔案。
+- **注意**：依券商規定，模擬下單亦需要憑證。請確保您已在 `.env` 中設定 `SHIOAJI_CA_PATH` 與 `SHIOAJI_CA_PASSWORD`。若未設定憑證，測試器將自動進入「模擬日誌模式」產生報告範本，供您預覽。
+
 ---
 
 ## 🔍 常見問題與異常排除 (Error 406)
