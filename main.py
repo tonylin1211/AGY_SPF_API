@@ -98,6 +98,15 @@ def main():
 
         with Live(monitor.generate_renderable(minimal=is_minimal, account_only=is_account), console=console, screen=use_screen, auto_refresh=False) as live:
             while monitor.running:
+                # 檢查是否需要執行重新連線
+                if getattr(monitor, 'needs_reconnect', False):
+                    live.stop()
+                    logger.warning("系統偵測到連線中斷，正在執行自動重連...")
+                    monitor.reconnect(account_only=is_account)
+                    live.start()
+                    # 重設 last_version 以免重連後畫面不立即更新
+                    last_version = -1
+
                 current_version = monitor.state.version
                 current_time_str = datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M:%S")
 

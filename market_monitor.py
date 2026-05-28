@@ -108,19 +108,25 @@ class MarketMonitor:
         self._mock_thread = None
         self._account_thread = None
 
-    def start(self, account_only: bool = False):
-        """
-        啟動監控服務。
-        嘗試登入永豐 API，若未提供金鑰或登入失敗，會自動切換為 Mock 模式。
-        """
-        self.running = True
-        
-        if not Config.has_credentials():
-            self.logger.warning("未偵測到 SHIOAJI_API_KEY 或 SHIOAJI_SECRET_KEY 變數，將進入 Mock 模擬演示模式。")
-            self.state.mode = "Mock 帳戶模式" if account_only else "Mock 模擬模式"
-            self._start_mock_mode()
-            return
+        # 斷線重連控制欄位
+        self.needs_reconnect = False
+        self.last_reconnect_time = 0.0
 
+    def _on_event_callback(self, resp_code: int, event_code: int, info: str, event: str):
+        """
+        處理來自 Solace 底層連線事件的回呼 (非同步觸發)
+        """
+        self.logger.info(f"API 連線事件通知: EventCode={event_code}, Event={event}, Info={info}, RespCode={resp_code}")
+        # Event code 1: SOLCLIENT_SESSION_EVENT_DOWN_ERROR
+        # Event code 2: SOLCLIENT_SESSION_EVENT_CONNECT_FAILED_ERROR
+        if event_code in (1, 2):
+            self.logger.warning("偵測到 API 連線中斷或連線失敗，設定需要重連標記...")
+            self.needs_reconnect = True
+
+    def _connect_and_subscribe(self, account_only: bool = False) -> bool:
+        """
+        執行連線、驗證與訂閱的核心邏輯。
+        """
         try:
             self.logger.info(f"正在連線至永豐期貨 API (Simulation={Config.SIMULATION})...")
             self.api = sj.Shioaji(simulation=Config.SIMULATION)
@@ -129,6 +135,10 @@ class MarketMonitor:
             self.logger.info("進行 API 金鑰驗證...")
             self.api.login(api_key=Config.API_KEY, secret_key=Config.SECRET_KEY)
             self.logger.info("永豐 API 驗證登入成功！")
+            
+            # 註冊連線事件監控
+            self.logger.info("註冊連線事件監控回呼...")
+            self.api.quote.set_event_callback(self._on_event_callback)
             
             if not account_only:
                 # 下載與初始化合約資訊
@@ -142,7 +152,7 @@ class MarketMonitor:
                 # 初始化昨收價與快照資訊
                 self._initialize_snapshots(futures_contract, index_contract)
                 
-                # 設定訂閱回呼 (Callback) - 註冊專屬的 Tick 回呼，覆蓋 Shioaji 預設在 stdout 的 print 行為
+                # 設定訂閱回呼 (Callback)
                 self.logger.info("註冊報價更新回呼事件...")
                 self.api.set_on_quote_callback(self._on_quote_callback)
                 self.api.set_on_tick_fop_v1_callback(self._on_tick_fop_callback)
@@ -160,15 +170,68 @@ class MarketMonitor:
                 self.state.mode = "SinoPac API 帳戶"
                 self.logger.info("帳戶監控模式啟動，跳過行情訂閱。")
             
-            # 啟動定期查詢帳務保證金與持倉部位的背景執行緒
-            self._account_thread = threading.Thread(target=self._run_account_query_loop, daemon=True)
-            self._account_thread.start()
-            
+            return True
         except Exception as e:
-            self.logger.error(f"永豐 API 初始化或連線失敗: {e}")
+            self.logger.error(f"連線或訂閱過程發生異常: {e}", exc_info=True)
+            return False
+
+    def start(self, account_only: bool = False):
+        """
+        啟動監控服務。
+        嘗試登入永豐 API，若未提供金鑰或登入失敗，會自動切換為 Mock 模式。
+        """
+        self.running = True
+        
+        if not Config.has_credentials():
+            self.logger.warning("未偵測到 SHIOAJI_API_KEY 或 SHIOAJI_SECRET_KEY 變數，將進入 Mock 模擬演示模式。")
+            self.state.mode = "Mock 帳戶模式" if account_only else "Mock 模擬模式"
+            self._start_mock_mode()
+            return
+
+        success = self._connect_and_subscribe(account_only)
+        if not success:
             self.logger.warning("正在自動降級切換至 Mock 模擬演示模式...")
             self.state.mode = "Mock 帳戶模式" if account_only else "Mock 模擬模式"
             self._start_mock_mode()
+            return
+            
+        # 啟動定期查詢帳務保證金與持倉部位的背景執行緒
+        self._account_thread = threading.Thread(target=self._run_account_query_loop, daemon=True)
+        self._account_thread.start()
+
+    def reconnect(self, account_only: bool = False):
+        """
+        執行 API 重新連線。由主執行緒觸發以避免 Solace 回呼執行緒死鎖。
+        """
+        now = time.time()
+        if now - self.last_reconnect_time < 10:
+            self.logger.info("距離上次重連嘗試未滿 10 秒，略過重連以避免頻繁請求...")
+            self.needs_reconnect = True  # 保持標記以便稍後再試
+            return
+            
+        self.last_reconnect_time = now
+        self.logger.warning("執行 API 重新連線程序...")
+        self.needs_reconnect = False
+        
+        # 1. 登出並清理舊連線
+        if self.api:
+            try:
+                self.logger.info("正在登出舊的 API 連線...")
+                self.api.logout()
+            except Exception as e:
+                self.logger.error(f"登出舊的 API 連線時發生錯誤: {e}")
+            self.api = None
+            
+        # 2. 等待 Socket 釋放
+        time.sleep(3)
+        
+        # 3. 嘗試重連與訂閱
+        success = self._connect_and_subscribe(account_only)
+        if success:
+            self.logger.info("API 重新連線與訂閱完成！")
+        else:
+            self.logger.error("API 重新連線失敗，將於下個週期再次嘗試...")
+            self.needs_reconnect = True
 
     def _get_futures_contract(self):
         """
@@ -354,6 +417,7 @@ class MarketMonitor:
         每 10 秒定期向伺服器查詢帳戶保證金與持倉部位，避免觸發 API 頻率限制。
         """
         self.logger.info("啟動帳戶與部位定期查詢服務...")
+        consecutive_failures = 0
         while self.running:
             if self.api and self.state.mode in ("SinoPac API 實時", "SinoPac API 帳戶"):
                 # 確保帳戶對象存在
@@ -392,6 +456,8 @@ class MarketMonitor:
                                     })
                             self.state.positions = new_positions
                             self.state.version += 1
+                        
+                        consecutive_failures = 0  # 成功取得資料，重設計數器
                             
                     except Exception as e:
                         err_msg = str(e)
@@ -401,6 +467,12 @@ class MarketMonitor:
                                 self.state.account_error = "查詢失敗 (錯誤碼 406): 請登入永豐期貨官網簽署「API電子交易風險預告書暨使用同意書」"
                             else:
                                 self.state.account_error = f"查詢失敗: {err_msg}"
+                                # 僅針對非 406 的通訊/系統錯誤進行累計
+                                consecutive_failures += 1
+                                if consecutive_failures >= 3:
+                                    self.logger.warning(f"帳戶與部位查詢已連續失敗 {consecutive_failures} 次，可能連線中斷，設定需要重連標記...")
+                                    self.needs_reconnect = True
+                                    consecutive_failures = 0
                             self.state.version += 1
                 else:
                     self.logger.warning("查無有效的期貨選擇權交易帳戶 (futopt_account)")
@@ -872,16 +944,16 @@ class MarketMonitor:
     def generate_minimal_renderable(self) -> Text:
         """
         生成極簡模式的渲染內容（僅包含時間與期貨價格，不含表格和邊框）
+        並同時顯示系統目前時間與最後報價取得時間
         """
         with self.state.lock:
             price_val = self.state.futures_price
             change_val = self.state.futures_change
             pct_val = self.state.futures_change_pct
+            quote_time = self.state.futures_time
             
-            time_val = self.state.futures_time
-            if time_val == "-":
-                tw_tz = pytz.timezone('Asia/Taipei')
-                time_val = datetime.now(tw_tz).strftime("%H:%M:%S")
+            tw_tz = pytz.timezone('Asia/Taipei')
+            sys_time = datetime.now(tw_tz).strftime("%H:%M:%S")
             
             if change_val > 0:
                 price_str = f"{price_val:.0f}"
@@ -900,7 +972,11 @@ class MarketMonitor:
                 color = "white"
                 
             text = Text()
-            text.append(f"[{time_val}] ", style="cyan")
+            text.append("[", style="cyan")
+            text.append(f"系統 {sys_time}", style="cyan")
+            text.append(" | ", style="cyan")
+            text.append(f"報價 {quote_time}", style="yellow" if quote_time != "-" else "red")
+            text.append("] ", style="cyan")
             text.append(f"台指期貨近月 ({Config.FUTURES_CODE}): ", style="bold white")
             text.append(price_str, style=color)
             text.append(f" ({change_str} / {pct_str})", style=color)
