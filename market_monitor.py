@@ -175,12 +175,13 @@ class MarketMonitor:
             self.logger.error(f"連線或訂閱過程發生異常: {e}", exc_info=True)
             return False
 
-    def start(self, account_only: bool = False):
+    def start(self, account_only: bool = False, query_account: bool = True):
         """
         啟動監控服務。
         嘗試登入永豐 API，若未提供金鑰或登入失敗，會自動切換為 Mock 模式。
         """
         self.running = True
+        self.query_account = query_account
         
         if not Config.has_credentials():
             self.logger.warning("未偵測到 SHIOAJI_API_KEY 或 SHIOAJI_SECRET_KEY 變數，將進入 Mock 模擬演示模式。")
@@ -196,14 +197,16 @@ class MarketMonitor:
             return
             
         # 啟動定期查詢帳務保證金與持倉部位的背景執行緒
-        self._account_thread = threading.Thread(target=self._run_account_query_loop, daemon=True)
-        self._account_thread.start()
+        if self.query_account:
+            self._account_thread = threading.Thread(target=self._run_account_query_loop, daemon=True)
+            self._account_thread.start()
 
-    def reconnect(self, account_only: bool = False):
+    def reconnect(self, account_only: bool = False, query_account: bool = True):
         """
         執行 API 重新連線。由主執行緒觸發以避免 Solace 回呼執行緒死鎖。
         """
         now = time.time()
+        self.query_account = query_account
         if now - self.last_reconnect_time < 10:
             self.logger.info("距離上次重連嘗試未滿 10 秒，略過重連以避免頻繁請求...")
             self.needs_reconnect = True  # 保持標記以便稍後再試
@@ -419,6 +422,9 @@ class MarketMonitor:
         self.logger.info("啟動帳戶與部位定期查詢服務...")
         consecutive_failures = 0
         while self.running:
+            if not getattr(self, 'query_account', True):
+                time.sleep(1)
+                continue
             if self.api and self.state.mode in ("SinoPac API 實時", "SinoPac API 帳戶"):
                 # 確保帳戶對象存在
                 account = getattr(self.api, 'futopt_account', None)

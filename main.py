@@ -83,7 +83,8 @@ def main():
     try:
         # 4. 啟動連線與訂閱服務
         is_account = args.account
-        monitor.start(account_only=is_account)
+        query_account = not args.minimal
+        monitor.start(account_only=is_account, query_account=query_account)
         
         # 5. 使用 Rich Live 進行同位置原地更新呈現
         logger.info("啟動動態終端介面，進入監控主迴圈...")
@@ -95,14 +96,14 @@ def main():
         last_version = -1
         last_time_str = ""
         tw_tz = pytz.timezone('Asia/Taipei')
-
+ 
         with Live(monitor.generate_renderable(minimal=is_minimal, account_only=is_account), console=console, screen=use_screen, auto_refresh=False) as live:
             while monitor.running:
                 # 檢查是否需要執行重新連線
                 if getattr(monitor, 'needs_reconnect', False):
                     live.stop()
                     logger.warning("系統偵測到連線中斷，正在執行自動重連...")
-                    monitor.reconnect(account_only=is_account)
+                    monitor.reconnect(account_only=is_account, query_account=query_account)
                     live.start()
                     # 重設 last_version 以免重連後畫面不立即更新
                     last_version = -1
