@@ -143,14 +143,14 @@ class MarketMonitor:
             if not account_only:
                 # 下載與初始化合約資訊
                 self.logger.info("正在初始化市場商品合約資訊...")
-                futures_contract = self._get_futures_contract()
-                index_contract = self._get_index_contract()
+                self.futures_contract = self._get_futures_contract()
+                self.index_contract = self._get_index_contract()
                 
-                if not futures_contract or not index_contract:
+                if not self.futures_contract or not self.index_contract:
                     raise ValueError("無法成功取得期貨或指數合約物件，可能 API 尚未完成合約下載。")
                     
                 # 初始化昨收價與快照資訊
-                self._initialize_snapshots(futures_contract, index_contract)
+                self._initialize_snapshots(self.futures_contract, self.index_contract)
                 
                 # 設定訂閱回呼 (Callback)
                 self.logger.info("註冊報價更新回呼事件...")
@@ -159,10 +159,10 @@ class MarketMonitor:
                 
                 # 訂閱即時 Tick 報價
                 self.logger.info(f"開始訂閱期貨合約: {Config.FUTURES_CODE}...")
-                self.api.quote.subscribe(futures_contract, quote_type='tick')
+                self.api.quote.subscribe(self.futures_contract, quote_type='tick')
                 
                 self.logger.info(f"開始訂閱加權指數: {Config.INDEX_CODE}...")
-                self.api.quote.subscribe(index_contract, quote_type='tick')
+                self.api.quote.subscribe(self.index_contract, quote_type='tick')
                 
                 self.state.mode = "SinoPac API 實時"
                 self.logger.info("API 行情訂閱設定完成。")
@@ -196,10 +196,9 @@ class MarketMonitor:
             self._start_mock_mode()
             return
             
-        # 啟動定期查詢帳務保證金與持倉部位的背景執行緒
-        if self.query_account:
-            self._account_thread = threading.Thread(target=self._run_account_query_loop, daemon=True)
-            self._account_thread.start()
+        # 啟動定期查詢與連線心跳監控的背景執行緒
+        self._account_thread = threading.Thread(target=self._run_account_query_loop, daemon=True)
+        self._account_thread.start()
 
     def reconnect(self, account_only: bool = False, query_account: bool = True):
         """
@@ -417,13 +416,33 @@ class MarketMonitor:
 
     def _run_account_query_loop(self):
         """
-        每 10 秒定期向伺服器查詢帳戶保證金與持倉部位，避免觸發 API 頻率限制。
+        每 10 秒定期向伺服器查詢帳戶保證金與持倉部位，或執行連線快照心跳檢測。
         """
-        self.logger.info("啟動帳戶與部位定期查詢服務...")
+        self.logger.info("啟動定期查詢與連線心跳監控服務...")
         consecutive_failures = 0
         while self.running:
             if not getattr(self, 'query_account', True):
-                time.sleep(1)
+                # 極簡模式下只進行 API 快照心跳檢測
+                if self.api and self.state.mode == "SinoPac API 實時":
+                    try:
+                        contract = getattr(self, 'futures_contract', None)
+                        if contract:
+                            self.logger.debug("發送 API 連線心跳檢測 (snapshots)...")
+                            self.api.snapshots([contract])
+                            consecutive_failures = 0
+                    except Exception as e:
+                        self.logger.error(f"API 連線心跳檢測失敗: {e}")
+                        consecutive_failures += 1
+                        if consecutive_failures >= 3:
+                            self.logger.warning(f"API 連線心跳檢測已連續失敗 {consecutive_failures} 次，判定連線中斷，設定需要重連標記...")
+                            self.needs_reconnect = True
+                            consecutive_failures = 0
+                
+                # 阻斷型休眠：每 0.5 秒檢測一次 running，加速退出
+                for _ in range(20):
+                    if not self.running:
+                        break
+                    time.sleep(0.5)
                 continue
             if self.api and self.state.mode in ("SinoPac API 實時", "SinoPac API 帳戶"):
                 # 確保帳戶對象存在
